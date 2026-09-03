@@ -1,4 +1,10 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-aiquota/brand/main/social/go-aiquota.png" alt="go-aiquota/plugin-claude" width="720"></p>
+
 # plugin-claude
+
+[![CI](https://github.com/go-aiquota/plugin-claude/actions/workflows/ci.yml/badge.svg)](https://github.com/go-aiquota/plugin-claude/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-aiquota/plugin-claude.svg)](https://pkg.go.dev/github.com/go-aiquota/plugin-claude)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 
 go-aiquota's [QuotaProvider](https://github.com/go-aiquota/proto) plugin for
 Claude (Max / Team Premium / Team Standard): a
