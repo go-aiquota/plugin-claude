@@ -9,8 +9,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/fatih/color v1.13.0 h1:8LOYc1KYPPmyKMuN8QV2DNRWNbLo6LZ0iLs8+mlH53w=
 github.com/fatih/color v1.13.0/go.mod h1:kLAiJbzzSOZDVNGyDpeOxJ47H46qBXwg5ILebYFFOfk=
-github.com/go-aiquota/proto v0.0.0-20260902110135-1c3310ee7d88 h1:kltViQFKBWs96r0rt0oWO7Osc0MVs9FJ6zTRGCRk1ic=
-github.com/go-aiquota/proto v0.0.0-20260902110135-1c3310ee7d88/go.mod h1:4FvSQoc7EbqQSqHuL/Rpip1IzR6CE/gJRjXAUQ5TY0I=
+github.com/go-aiquota/proto v0.0.0-20260904115537-ab4aafbf51e8 h1:lHnqEs+bgim9uQbjqDNlErmWJWf+OHj+3KVDUPTkoxY=
+github.com/go-aiquota/proto v0.0.0-20260904115537-ab4aafbf51e8/go.mod h1:4FvSQoc7EbqQSqHuL/Rpip1IzR6CE/gJRjXAUQ5TY0I=
 github.com/go-browserhttp/browserhttp v0.2.0 h1:3RcjOQVHgqhSOmI5cfsURpexw/vetoDUoLXKzgTCSac=
 github.com/go-browserhttp/browserhttp v0.2.0/go.mod h1:VJiwBxLetXdc8eDadOcNbiO0EelNQPny0cLZhg1hTKU=
 github.com/go-logr/logr v1.4.2 h1:6pFjapn8bFcIbiKo3XT4j/BhANplGihG6tvd+8rYgrY=
