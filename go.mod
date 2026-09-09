@@ -3,7 +3,7 @@ module github.com/go-aiquota/plugin-claude
 go 1.26.4
 
 require (
-	github.com/go-aiquota/proto v0.0.0-20260904115537-ab4aafbf51e8
+	github.com/go-aiquota/proto v0.0.0-20260908121902-364f200d51f2
 	github.com/go-browserhttp/browserhttp v0.2.0
 	github.com/hashicorp/go-plugin v1.8.0
 )
@@ -20,11 +20,11 @@ require (
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/oklog/run v1.1.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
-	golang.org/x/crypto v0.36.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20241202173237-19429a94021a // indirect
-	google.golang.org/grpc v1.70.0 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/grpc v1.83.2 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
 )
