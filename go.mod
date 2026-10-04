@@ -1,6 +1,6 @@
 module github.com/go-aiquota/plugin-claude
 
-go 1.26.4
+go 1.27.1
 
 require (
 	github.com/go-aiquota/proto v0.0.0-20260927173035-fe686a6d6a59
