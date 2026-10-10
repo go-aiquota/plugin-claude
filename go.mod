@@ -1,6 +1,6 @@
 module github.com/go-aiquota/plugin-claude
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/go-aiquota/proto v0.0.0-20261004223757-f2b5ca7be72d
@@ -21,7 +21,7 @@ require (
 	github.com/oklog/run v1.1.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
