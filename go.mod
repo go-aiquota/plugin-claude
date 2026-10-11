@@ -3,7 +3,7 @@ module github.com/go-aiquota/plugin-claude
 go 1.27.2
 
 require (
-	github.com/go-aiquota/proto v0.0.0-20261004223757-f2b5ca7be72d
+	github.com/go-aiquota/proto v0.0.0-20261010212053-7827b32e00aa
 	github.com/go-browserhttp/browserhttp v0.3.0
 	github.com/hashicorp/go-plugin v1.8.0
 )
