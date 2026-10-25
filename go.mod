@@ -1,6 +1,16 @@
 module github.com/go-aiquota/plugin-claude
 
-go 1.27.2
+// ⛔ The PATCH, because govulncheck judges the standard library by the version
+// the module claims. GO-2026-6809 — crypto/x509, where compromised
+// intermediate certificates are no longer refused by Certificate.Verify — has
+// its fix RELEASED in 1.27.3, and vulngate accepts no waiver for an advisory
+// whose fix is released.
+//
+// ⚠ Unlike its sibling tools, this repository's lane does NOT read this line:
+// it pins `go-version: '1.27.3'` literally, twice. Both are raised together,
+// because raising only the directive would leave the lane building with the
+// older toolchain while the contract claimed the newer one.
+go 1.27.3
 
 require (
 	github.com/go-aiquota/proto v0.0.0-20261010212053-7827b32e00aa
