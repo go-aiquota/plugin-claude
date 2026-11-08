@@ -14,18 +14,18 @@ go 1.27.3
 
 require (
 	github.com/go-aiquota/proto v0.0.0-20261101015222-ed7100b4df3c
-	github.com/go-browserhttp/browserhttp v0.3.0
+	github.com/go-browserhttp/browserhttp v0.3.1
 	github.com/hashicorp/go-plugin v1.8.0
 )
 
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
-	github.com/breml/rootcerts v0.3.7 // indirect
+	github.com/breml/rootcerts v0.3.8 // indirect
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/oklog/run v1.1.0 // indirect
