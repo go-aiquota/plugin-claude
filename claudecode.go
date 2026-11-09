@@ -197,6 +197,11 @@ type claudeCodeLogin struct {
 	expiresAt time.Time // zero: unknown
 	plan      string
 	scopes    []string
+	// planSource / planVerifiedAt are Claude Code's own bookkeeping of where
+	// the stored plan came from ("sign_in" or "profile") and when it last
+	// checked it against the profile (binary: IL, DL).
+	planSource     string
+	planVerifiedAt time.Time // zero: never
 }
 
 // Format masks the whole struct for every verb: fmt reaches an UNEXPORTED
@@ -214,6 +219,8 @@ func decodeCredential(raw []byte) (claudeCodeLogin, error) {
 			ExpiresAt        *float64 `json:"expiresAt"`
 			Scopes           []string `json:"scopes"`
 			SubscriptionType *string  `json:"subscriptionType"`
+			PlanSource       *string  `json:"subscriptionTypeSource"`
+			PlanVerifiedAt   *float64 `json:"subscriptionTypeVerifiedAt"`
 		} `json:"claudeAiOauth"`
 	}
 	if err := json.Unmarshal(raw, &top); err != nil {
@@ -228,6 +235,12 @@ func decodeCredential(raw []byte) (claudeCodeLogin, error) {
 	}
 	if top.OAuth.SubscriptionType != nil {
 		l.plan = *top.OAuth.SubscriptionType
+	}
+	if top.OAuth.PlanSource != nil {
+		l.planSource = *top.OAuth.PlanSource
+	}
+	if top.OAuth.PlanVerifiedAt != nil && *top.OAuth.PlanVerifiedAt > 0 {
+		l.planVerifiedAt = time.UnixMilli(int64(*top.OAuth.PlanVerifiedAt))
 	}
 	return l, nil
 }
@@ -402,10 +415,79 @@ func fetchClaudeCode(ctx context.Context, accountLabel string) (*quotapb.QuotaSn
 		FetchedAtUnix: time.Now().Unix(),
 		Windows:       overlayWindows(usage, login.plan),
 	}
+	if note := planNote(ctx, login, base, red); note != "" {
+		snap.Warnings = append(snap.Warnings, note)
+	}
 	if len(login.scopes) > 0 && !contains(login.scopes, "user:profile") {
 		snap.Warnings = append(snap.Warnings, "the Claude Code login lacks the user:profile scope; plan usage may be unavailable")
 	}
 	return snap, nil
+}
+
+// profilePlans maps organization.organization_type of GET /api/oauth/profile
+// to the stored subscriptionType (binary: iEo, _Or).
+var profilePlans = map[string]string{
+	"claude_max":        "max",
+	"claude_pro":        "pro",
+	"claude_enterprise": "enterprise",
+	"claude_team":       "team",
+}
+
+// decodeProfilePlan extracts the plan ("" if unknown) from a profile body.
+func decodeProfilePlan(body []byte) string {
+	var p struct {
+		Organization struct {
+			Type string `json:"organization_type"`
+		} `json:"organization"`
+	}
+	if len(body) > maxUsageBody || json.Unmarshal(body, &p) != nil {
+		return ""
+	}
+	return profilePlans[p.Organization.Type]
+}
+
+// planNote compares the plan Claude Code STORED with the account's live
+// profile (the source Claude Code itself reconciles from, binary: Fon/DL) and
+// returns a sentence when they differ or cannot be compared, "" when they
+// agree. The panel's Plan row shows the stored value, which Claude Code only
+// rewrites when it re-reads the profile or on a new sign-in (a token refresh
+// carries it forward unchanged: extension.js doRefreshOAuthToken), so right
+// after a plan change it can be stale. Nothing is cached.
+func planNote(ctx context.Context, login claudeCodeLogin, base *url.URL, red *redact.Redactor) string {
+	stored := login.plan
+	if stored == "" {
+		stored = "unknown"
+	}
+	since := "never re-verified against the profile"
+	if !login.planVerifiedAt.IsZero() {
+		since = "last verified " + login.planVerifiedAt.Local().Format("2006-01-02 15:04 MST")
+	}
+	src := login.planSource
+	if src == "" {
+		src = "unrecorded source"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String()+"/api/oauth/profile", nil)
+	if err != nil {
+		return ""
+	}
+	login.token.Reveal(func(v string) { req.Header.Set("Authorization", "Bearer "+v) })
+	req.Header.Set("anthropic-beta", oauthBeta)
+	req.Header.Set("User-Agent", claudeCodeUA)
+	req.Header.Set("Cache-Control", "no-cache")
+	resp, err := claudeCodeClient().Do(req)
+	if err != nil {
+		return red.String(fmt.Sprintf("plan %q is the stored login's (%s, %s); the account profile could not be read to confirm it", stored, src, since))
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsageBody+1))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("plan %q is the stored login's (%s, %s); the account profile could not be read to confirm it (HTTP %d)", stored, src, since, resp.StatusCode)
+	}
+	live := decodeProfilePlan(body)
+	if live == "" || live == login.plan {
+		return ""
+	}
+	return fmt.Sprintf("plan mismatch: Claude Code's stored login says %q (%s, %s) but the account profile says %q; Claude Code has not refreshed its stored plan (it does on its next profile check or a new sign-in)", stored, src, since, live)
 }
 
 func contains(ss []string, s string) bool {

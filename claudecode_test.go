@@ -65,6 +65,9 @@ func req() *quotapb.FetchQuotaRequest {
 func TestWindowsMatchThePanelRowsAndOrder(t *testing.T) {
 	var gotAuth, gotBeta, gotUA, gotPath string
 	serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/oauth/usage" {
+			return // the plan-confirmation call: covered by its own tests
+		}
 		gotAuth, gotBeta, gotUA, gotPath = r.Header.Get("Authorization"), r.Header.Get("anthropic-beta"), r.Header.Get("User-Agent"), r.URL.Path
 		_, _ = w.Write([]byte(oauthFixture))
 	})
@@ -252,4 +255,115 @@ func FuzzDecodeCredential(f *testing.F) {
 			t.Errorf("secret printed: %s", s)
 		}
 	})
+}
+
+func credWithPlan(plan, source string, verifiedMs int64) []byte {
+	exp := time.Now().UnixMilli() + 3600_000
+	extra := ""
+	if source != "" {
+		extra += fmt.Sprintf(`,"subscriptionTypeSource":%q`, source)
+	}
+	if verifiedMs > 0 {
+		extra += fmt.Sprintf(`,"subscriptionTypeVerifiedAt":%d`, verifiedMs)
+	}
+	return []byte(fmt.Sprintf(`{"claudeAiOauth":{"accessToken":%q,"expiresAt":%d,"scopes":["user:profile"],"subscriptionType":%q%s}}`, fakeToken, exp, plan, extra))
+}
+
+func profileServer(t *testing.T, profileStatus int, profileBody string) *int {
+	t.Helper()
+	calls := new(int)
+	serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/oauth/profile" {
+			*calls++
+			if r.Header.Get("Authorization") != "Bearer "+fakeToken || r.Header.Get("Cache-Control") != "no-cache" {
+				t.Errorf("profile request headers: %v", r.Header)
+			}
+			w.WriteHeader(profileStatus)
+			_, _ = w.Write([]byte(profileBody))
+			return
+		}
+		_, _ = w.Write([]byte(oauthFixture))
+	})
+	return calls
+}
+
+func warnings(t *testing.T) []string {
+	t.Helper()
+	snap, err := (Provider{}).FetchQuota(context.Background(), req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap.Warnings
+}
+
+// A plan change: the stored login still says team, the profile says max.
+func TestStalePlanIsSaidNotAsserted(t *testing.T) {
+	calls := profileServer(t, 200, `{"organization":{"organization_type":"claude_max","rate_limit_tier":"x"}}`)
+	withCred(credWithPlan("team", "sign_in", 0))
+	ws := warnings(t)
+	if *calls != 1 || len(ws) != 1 {
+		t.Fatalf("calls %d warnings %v", *calls, ws)
+	}
+	for _, want := range []string{"plan mismatch", `"team"`, "sign_in", "never re-verified", `"max"`, "has not refreshed"} {
+		if !strings.Contains(ws[0], want) {
+			t.Errorf("warning lacks %q: %s", want, ws[0])
+		}
+	}
+	snap, _ := (Provider{}).FetchQuota(context.Background(), req())
+	if snap.PlanKind != "team" {
+		t.Errorf("PlanKind %q: must stay the stored value the panel shows", snap.PlanKind)
+	}
+}
+
+func TestVerifiedTimeIsShown(t *testing.T) {
+	profileServer(t, 200, `{"organization":{"organization_type":"claude_pro"}}`)
+	withCred(credWithPlan("max", "profile", time.Date(2026, 11, 8, 9, 30, 0, 0, time.UTC).UnixMilli()))
+	ws := warnings(t)
+	if len(ws) != 1 || !strings.Contains(ws[0], "last verified 2026-11-08") || !strings.Contains(ws[0], "profile") {
+		t.Fatalf("%v", ws)
+	}
+}
+
+func TestAgreeingPlanHasNoNote(t *testing.T) {
+	profileServer(t, 200, `{"organization":{"organization_type":"claude_team"}}`)
+	withCred(credWithPlan("team", "profile", 1))
+	if ws := warnings(t); len(ws) != 0 {
+		t.Fatalf("%v", ws)
+	}
+}
+
+func TestUnreadableProfileIsSaidAndWindowsStillServed(t *testing.T) {
+	profileServer(t, 500, `boom`)
+	withCred(credWithPlan("team", "", 0))
+	snap, err := (Provider{}).FetchQuota(context.Background(), req())
+	if err != nil || len(snap.Windows) == 0 {
+		t.Fatalf("%v %v", snap, err)
+	}
+	if len(snap.Warnings) != 1 || !strings.Contains(snap.Warnings[0], "could not be read to confirm") || !strings.Contains(snap.Warnings[0], "unrecorded source") {
+		t.Fatalf("%v", snap.Warnings)
+	}
+}
+
+func TestUnknownProfileTypeMakesNoClaim(t *testing.T) {
+	profileServer(t, 200, `{"organization":{"organization_type":"something_new"}}`)
+	withCred(credWithPlan("team", "sign_in", 0))
+	if ws := warnings(t); len(ws) != 0 {
+		t.Fatalf("%v", ws)
+	}
+}
+
+func TestProfileNeverCalledWithAnExpiredToken(t *testing.T) {
+	calls := profileServer(t, 200, `{}`)
+	withCred(credJSON(-1000, "team"))
+	_, _ = (Provider{}).FetchQuota(context.Background(), req())
+	if *calls != 0 {
+		t.Error("profile read with an expired token")
+	}
+}
+
+func FuzzDecodeProfilePlan(f *testing.F) {
+	f.Add([]byte(`{"organization":{"organization_type":"claude_max"}}`))
+	f.Add([]byte(`{"organization":null}`))
+	f.Add([]byte(`[]`))
+	f.Fuzz(func(t *testing.T, b []byte) { _ = decodeProfilePlan(b) })
 }
