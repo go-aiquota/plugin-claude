@@ -13,12 +13,31 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
 	hcplugin "github.com/hashicorp/go-plugin"
 
 	"github.com/go-aiquota/proto/plugin"
 )
 
 func main() {
+	// `plugin-claude --raw-usage` prints the usage response Claude Code's
+	// source returns (no credential in it) and exits; it is how
+	// `aiquota status -o json --raw` shows everything the endpoint says.
+	if len(os.Args) == 2 && os.Args[1] == "--raw-usage" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		b, err := RawUsage(ctx)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "plugin-claude:", err)
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.Write(b)
+		return
+	}
 	hcplugin.Serve(&hcplugin.ServeConfig{
 		HandshakeConfig: plugin.Handshake,
 		Plugins:         plugin.Map(&Provider{}),

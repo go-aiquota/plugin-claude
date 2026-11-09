@@ -89,7 +89,7 @@ func (Provider) FetchQuota(ctx context.Context, req *quotapb.FetchQuotaRequest) 
 	if req.GetCredential()[sourceKey] == sourceClaudeCode {
 		// The Claude Code login, read from its own storage at fetch time: the
 		// same account, plan and windows as Claude Code's "Account & usage".
-		return fetchClaudeCode(ctx, req.GetAccountLabel())
+		return fetchClaudeCode(ctx, req.GetAccountLabel(), req.GetCredential()[viewKey] == viewOverlay)
 	}
 	orgUUID := req.GetCredential()[orgUUIDKey]
 	if orgUUID == "" {

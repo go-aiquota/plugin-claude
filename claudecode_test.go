@@ -57,8 +57,187 @@ func withCred(b []byte) {
 	readCredential = func(context.Context) ([]byte, error) { return b, nil }
 }
 
+// req asks for every window the endpoint returns (the default view); overlayReq
+// asks for exactly the panel's rows.
 func req() *quotapb.FetchQuotaRequest {
 	return &quotapb.FetchQuotaRequest{AccountLabel: "Claude Code", Credential: map[string]string{sourceKey: sourceClaudeCode}}
+}
+
+func overlayReq() *quotapb.FetchQuotaRequest {
+	return &quotapb.FetchQuotaRequest{AccountLabel: "Claude Code", Credential: map[string]string{sourceKey: sourceClaudeCode, viewKey: viewOverlay}}
+}
+
+// dynamicFixture is what the live endpoint looks like (2026-11-09): two
+// windows with a value, known windows that are null, dozens of unrelated
+// null fields, a non-window object, and a limits[] that repeats the two
+// standard windows and adds a model-scoped one; plus the shapes it may take
+// tomorrow: an unknown top-level window, a limits[] entry without a model,
+// a window with a null utilization.
+const dynamicFixture = `{
+ "five_hour": {"utilization": 2.0, "resets_at": "2026-11-09T19:30:00.041358+00:00", "limit_dollars": null},
+ "seven_day": {"utilization": 17.0, "resets_at": "2026-11-14T22:00:00.041377+00:00"},
+ "seven_day_oauth_apps": {"utilization": 12.5, "resets_at": "2026-11-14T22:00:00+00:00"},
+ "seven_day_opus": null,
+ "seven_day_sonnet": null,
+ "seven_day_cowork": {"utilization": null, "resets_at": null},
+ "tangelo": null,
+ "pace": null,
+ "extra_usage": {"is_enabled": false, "utilization": null, "currency": null},
+ "limits": [
+  {"kind":"session","group":"session","percent":2,"severity":"normal","resets_at":"2026-11-09T19:30:00.041358+00:00","scope":null,"is_active":false},
+  {"kind":"weekly_all","group":"weekly","percent":17,"severity":"normal","resets_at":"2026-11-14T22:00:00.041377+00:00","scope":null,"is_active":true},
+  {"kind":"weekly_scoped","group":"weekly","percent":0,"severity":"normal","resets_at":"2026-11-14T22:00:00+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false},
+  {"kind":"monthly_all","group":"monthly","percent":40,"severity":"warning","resets_at":"2026-12-01T00:00:00+00:00","scope":null,"is_active":true},
+  {"kind":"weekly_scoped","group":"weekly","percent":61,"severity":"normal","scope":{"model":null,"surface":"cowork"}}
+ ]
+}`
+
+func TestEveryWindowTheEndpointReturnsIsShown(t *testing.T) {
+	serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/oauth/usage" {
+			_, _ = w.Write([]byte(dynamicFixture))
+		}
+	})
+	withCred(credJSON(3600_000, "team"))
+	snap, err := Provider{}.FetchQuota(context.Background(), req())
+	if err != nil {
+		t.Fatal(err)
+	}
+	type row struct {
+		label string
+		used  float64
+		limit float64
+		unit  string
+	}
+	want := []row{
+		{"Session (5hr)", 2, 100, "%"},
+		{"Weekly (7 day)", 17, 100, "%"},
+		{"Weekly Sonnet", 0, 0, "n/a"},                // known, null
+		{"Weekly Opus", 0, 0, "n/a"},                  // known, null: never shown by the panel
+		{"Weekly (7 day) cowork", 0, 0, "n/a"},        // unknown field, null utilization
+		{"Weekly (7 day) oauth apps", 12.5, 100, "%"}, // unknown field with a value
+		{"Weekly Fable", 0, 100, "%"},                 // limits[] with a model
+		{"Monthly", 40, 100, "%"},                     // limits[] without a model
+		{"Weekly cowork", 61, 100, "%"},               // limits[] scoped to a surface
+	}
+	var got []row
+	for _, w := range snap.Windows {
+		got = append(got, row{w.Label, w.Used, w.Limit, w.Unit})
+	}
+	// unknown fields come sorted by name: cowork before oauth_apps.
+	if len(got) != len(want) {
+		t.Fatalf("windows:\n got %v\nwant %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d: got %v want %v", i, got[i], want[i])
+		}
+	}
+	joined := strings.Join(snap.Warnings, "\n")
+	for _, w := range []string{"Weekly Sonnet: not available", "Weekly Opus: not available", "Weekly (7 day) cowork: not available", "Monthly: severity warning"} {
+		if !strings.Contains(joined, w) {
+			t.Errorf("warnings lack %q:\n%s", w, joined)
+		}
+	}
+	if strings.Contains(joined, "Weekly Fable: severity") {
+		t.Errorf("a normal severity is not a warning:\n%s", joined)
+	}
+}
+
+func TestOverlayViewReproducesThePanelExactly(t *testing.T) {
+	serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/oauth/usage" {
+			_, _ = w.Write([]byte(dynamicFixture))
+		}
+	})
+	withCred(credJSON(3600_000, "team"))
+	snap, err := Provider{}.FetchQuota(context.Background(), overlayReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labels []string
+	for _, w := range snap.Windows {
+		labels = append(labels, w.Label)
+	}
+	// The panel: Session, Weekly, (Sonnet is null: hidden), then model-scoped limits only.
+	if got := strings.Join(labels, "|"); got != "Session (5hr)|Weekly (7 day)|Weekly Fable" {
+		t.Errorf("overlay rows: %s", got)
+	}
+}
+
+func TestTheSameWindowInTwoPlacesIsDrawnOnceAndTheValueWins(t *testing.T) {
+	u, err := decodeUsage([]byte(`{
+	 "seven_day_sonnet": null,
+	 "five_hour": {"utilization": 3, "resets_at": null},
+	 "limits": [
+	  {"kind":"session","group":"session","percent":99},
+	  {"kind":"weekly_scoped","group":"weekly","percent":8.5,"scope":{"model":{"display_name":"Sonnet"}}}
+	 ]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.Windows) != 2 {
+		t.Fatalf("%+v", u.Windows)
+	}
+	if u.Windows[0].Label != "Session (5hr)" || *u.Windows[0].Percent != 3 {
+		t.Errorf("the top-level window stands: %+v", u.Windows[0])
+	}
+	if u.Windows[1].Label != "Weekly Sonnet" || u.Windows[1].Percent == nil || *u.Windows[1].Percent != 8.5 {
+		t.Errorf("a null top-level window takes the limits[] value: %+v", u.Windows[1])
+	}
+}
+
+func TestMalformedKnownWindowIsAnErrorButUnknownOnesAreSkipped(t *testing.T) {
+	if _, err := decodeUsage([]byte(`{"five_hour":{"utilization":"x","resets_at":null}}`)); err == nil {
+		t.Error("a malformed known window must be an error")
+	}
+	u, err := decodeUsage([]byte(`{"seven_day_new":{"utilization":"x","resets_at":null},"seven_day":{"utilization":1,"resets_at":null},"limits":[{"percent":"a"},{"kind":"session","percent":5}]}`))
+	if err != nil || len(u.Windows) != 2 {
+		t.Fatalf("%v %+v", err, u.Windows)
+	}
+}
+
+func TestLabelsDerivedFromKeys(t *testing.T) {
+	for k, want := range map[string]string{
+		"seven_day_oauth_apps": "Weekly (7 day) oauth apps",
+		"five_hour_burst":      "Session (5hr) burst",
+		"seven_day":            "Weekly (7 day)",
+		"monthly_credits":      "Monthly credits",
+	} {
+		if got := fieldLabel(k); got != want {
+			t.Errorf("fieldLabel(%q) = %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestAtMostMaxWindows(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{`)
+	for i := 0; i < 500; i++ {
+		fmt.Fprintf(&b, `"w%03d":{"utilization":1,"resets_at":null},`, i)
+	}
+	b.WriteString(`"x":1}`)
+	u, err := decodeUsage([]byte(b.String()))
+	if err != nil || len(u.Windows) != maxWindows {
+		t.Fatalf("%v %d", err, len(u.Windows))
+	}
+}
+
+func TestRawUsageIsTheBodyWithoutTheToken(t *testing.T) {
+	serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/oauth/usage" {
+			_, _ = w.Write([]byte(dynamicFixture))
+		}
+	})
+	withCred(credJSON(3600_000, "team"))
+	b, err := RawUsage(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !strings.Contains(s, `"seven_day_oauth_apps"`) || !strings.Contains(s, `"tangelo": null`) || strings.Contains(s, "FAKEFAKE") || strings.Contains(s, "REFRESH") {
+		t.Errorf("raw usage:\n%s", s)
+	}
 }
 
 // The panel's rows, in its order and with its labels (webview/index.js WDn).
@@ -72,7 +251,7 @@ func TestWindowsMatchThePanelRowsAndOrder(t *testing.T) {
 		_, _ = w.Write([]byte(oauthFixture))
 	})
 	withCred(credJSON(3600_000, "max"))
-	snap, err := Provider{}.FetchQuota(context.Background(), req())
+	snap, err := Provider{}.FetchQuota(context.Background(), overlayReq())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +282,7 @@ func TestWindowsMatchThePanelRowsAndOrder(t *testing.T) {
 func TestWeeklySonnetRowOnlyForMaxTeamOrUnknown(t *testing.T) {
 	serve(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(oauthFixture)) })
 	withCred(credJSON(3600_000, "pro"))
-	snap, err := Provider{}.FetchQuota(context.Background(), req())
+	snap, err := Provider{}.FetchQuota(context.Background(), overlayReq())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,13 +293,18 @@ func TestWeeklySonnetRowOnlyForMaxTeamOrUnknown(t *testing.T) {
 	}
 }
 
-func TestNullWindowIsNotShown(t *testing.T) {
+// The panel hides a null window; the default view keeps it, as "n/a".
+func TestNullWindowIsHiddenByTheOverlayAndKeptAsNotAvailableOtherwise(t *testing.T) {
 	serve(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"five_hour":{"utilization":null,"resets_at":null},"seven_day":{"utilization":3,"resets_at":null}}`))
 	})
 	withCred(credJSON(3600_000, "max"))
-	snap, err := Provider{}.FetchQuota(context.Background(), req())
+	snap, err := Provider{}.FetchQuota(context.Background(), overlayReq())
 	if err != nil || len(snap.Windows) != 1 || snap.Windows[0].Label != "Weekly (7 day)" || snap.Windows[0].ResetsAtUnix != 0 {
+		t.Fatalf("%v %v", snap, err)
+	}
+	snap, err = Provider{}.FetchQuota(context.Background(), req())
+	if err != nil || len(snap.Windows) != 2 || snap.Windows[0].Label != "Session (5hr)" || snap.Windows[0].Unit != unitNotAvailable || snap.Windows[0].Limit != 0 {
 		t.Fatalf("%v %v", snap, err)
 	}
 }
@@ -232,12 +416,32 @@ func FuzzDecodeUsage(f *testing.F) {
 	f.Add([]byte(`{"limits":[{"percent":"a"}]}`))
 	f.Add([]byte(`[]`))
 	f.Add([]byte(``))
+	f.Add([]byte(dynamicFixture))
+	f.Add([]byte(`{"seven_day_x":{"utilization":null,"resets_at":null},"limits":[{"kind":"k","scope":{"model":null,"surface":{"a":1}}},{"kind":"k","scope":null,"percent":null}]}`))
+	f.Add([]byte(`{"limits":{"kind":"x"},"five_hour":[],"seven_day":{"utilization":1e999}}`))
+	f.Add([]byte(`{"a":{"utilization":null,"resets_at":null},"a":{"utilization":1,"resets_at":"x"}}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		u, err := decodeUsage(b)
-		if err == nil {
-			_ = overlayWindows(u, "max")
-			_ = overlayWindows(u, "pro")
+		if err != nil {
+			return
 		}
+		if len(u.Windows) > maxWindows {
+			t.Fatalf("%d windows", len(u.Windows))
+		}
+		keys := map[string]bool{}
+		for _, w := range u.Windows {
+			if keys[w.Key] {
+				t.Fatalf("window key %q drawn twice", w.Key)
+			}
+			keys[w.Key] = true
+			if w.Label == "" {
+				t.Fatalf("window without a label: %+v", w)
+			}
+		}
+		_ = overlayWindows(u, "max")
+		_ = overlayWindows(u, "pro")
+		_ = allWindows(u)
+		_ = windowNotes(u)
 	})
 }
 
@@ -289,7 +493,9 @@ func profileServer(t *testing.T, profileStatus int, profileBody string) *int {
 
 func warnings(t *testing.T) []string {
 	t.Helper()
-	snap, err := (Provider{}).FetchQuota(context.Background(), req())
+	// The overlay view: the window notes of the default view are not what these
+	// tests are about, the plan note is.
+	snap, err := (Provider{}).FetchQuota(context.Background(), overlayReq())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +541,7 @@ func TestAgreeingPlanHasNoNote(t *testing.T) {
 func TestUnreadableProfileIsSaidAndWindowsStillServed(t *testing.T) {
 	profileServer(t, 500, `boom`)
 	withCred(credWithPlan("team", "", 0))
-	snap, err := (Provider{}).FetchQuota(context.Background(), req())
+	snap, err := (Provider{}).FetchQuota(context.Background(), overlayReq())
 	if err != nil || len(snap.Windows) == 0 {
 		t.Fatalf("%v %v", snap, err)
 	}
