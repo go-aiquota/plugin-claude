@@ -13,7 +13,35 @@ launched and dialed by [go-aiquota/tray](https://github.com/go-aiquota/tray)'s
 `quota.Manager`, that turns an account's claude.ai session cookies into a
 `QuotaSnapshot`.
 
-## What it calls
+## Credential source "Claude Code" (preferred)
+
+With `Credential = {"source": "claude-code"}` the plugin reads **Claude Code's
+own login** at fetch time and shows the same account, plan, windows and
+percentages as the VS Code extension's *Account & usage* panel. It never
+refreshes or rotates that token (Claude Code renews its own login; a second
+holder rotating the refresh token would sign it out): an expired token is
+reported as `token expired, open Claude Code`.
+
+- Storage (extension.js `yc`/`bc`, authentication docs "Credential
+  management"): macOS Keychain item `Claude Code-credentials`, account `$USER`
+  (+ `-<sha256(CLAUDE_CONFIG_DIR)[:8]>` when that variable is set), read with
+  `/usr/bin/security find-generic-password -w`, which the item's ACL trusts, so
+  there is no prompt and nothing to re-approve after a reinstall; otherwise
+  `~/.claude/.credentials.json`. The secret travels on a pipe — never argv,
+  environment or disk — and is held in a `secret.Secret`.
+- Request: `GET https://api.anthropic.com/api/oauth/usage`,
+  `Authorization: Bearer …`, `anthropic-beta: oauth-2025-04-20`,
+  `User-Agent: claude-code/2.1.319`; TLS 1.2+, that host only, no redirects,
+  1 MiB response cap. Errors are redacted of the token.
+- Rows and labels as the panel (webview `WDn`): `Session (5hr)`,
+  `Weekly (7 day)`, `Weekly Sonnet` (max/team/unknown plans), then
+  `Weekly <model>` per model-scoped limit; a null window is not shown.
+  Known approximation: the panel filters model-scoped rows through a remote
+  allowlist (`tengu_usage_overage_included_models`) that this plugin cannot
+  read, so it shows every model-scoped limit other than Sonnet/Opus.
+- Fuzz targets: `FuzzDecodeUsage`, `FuzzDecodeCredential`.
+
+## What it calls (claude.ai cookie source, the fallback)
 
 `GET https://claude.ai/api/organizations/{org_uuid}/usage`, authenticated
 purely by the account's claude.ai session cookies (no separate API key or

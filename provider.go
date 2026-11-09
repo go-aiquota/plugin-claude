@@ -86,6 +86,11 @@ func (Provider) Describe(context.Context, *quotapb.DescribeRequest) (*quotapb.Pr
 // one its web app calls to show the usage bar in Settings — and mapping
 // each of its reported limits into a QuotaWindow.
 func (Provider) FetchQuota(ctx context.Context, req *quotapb.FetchQuotaRequest) (*quotapb.QuotaSnapshot, error) {
+	if req.GetCredential()[sourceKey] == sourceClaudeCode {
+		// The Claude Code login, read from its own storage at fetch time: the
+		// same account, plan and windows as Claude Code's "Account & usage".
+		return fetchClaudeCode(ctx, req.GetAccountLabel())
+	}
 	orgUUID := req.GetCredential()[orgUUIDKey]
 	if orgUUID == "" {
 		return nil, fmt.Errorf("plugin-claude: credential is missing %q — the account must be re-added so onboarding can capture it alongside the claude.ai cookies", orgUUIDKey)
