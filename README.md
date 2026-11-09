@@ -33,7 +33,23 @@ reported as `token expired, open Claude Code`.
   `Authorization: Bearer …`, `anthropic-beta: oauth-2025-04-20`,
   `User-Agent: claude-code/2.1.319`; TLS 1.2+, that host only, no redirects,
   1 MiB response cap. Errors are redacted of the token.
-- Rows and labels as the panel (webview `WDn`): `Session (5hr)`,
+- **Every window the endpoint returns, by default.** The body is decoded as a
+  map: each top-level value shaped `{utilization, resets_at}` is a window
+  (known keys keep the panel's labels and order, `seven_day_opus` included;
+  an unknown key gets a label derived from it, `seven_day_oauth_apps` becomes
+  `Weekly (7 day) oauth apps`), then each `limits[]` entry the top level did
+  not already report (label from its kind, group and scope: a model, or
+  another scope). The pair of places is de-duplicated by an explicit key
+  (`session`, `weekly_all`, `weekly_scoped/<model>`, the limit's own kind,
+  `top/<field>`), not by label. A window with `utilization: null` is kept as
+  `Unit: "n/a"` with a snapshot warning saying why; bare `null` fields of no
+  known shape are not windows. A limit's severity other than `normal`/`ok` is
+  a snapshot warning. At most 64 windows; the body is capped at 1 MiB.
+  `Credential = {"source": "claude-code", "view": "overlay"}` returns exactly
+  the panel's rows (below), for the equality check against the extension.
+  `plugin-claude --raw-usage` prints the response body, indented (it holds no
+  credential), and exits: `aiquota status -o json --raw` runs it.
+- The overlay view's rows and labels as the panel (webview `WDn`): `Session (5hr)`,
   `Weekly (7 day)`, `Weekly Sonnet` (max/team/unknown plans), then
   `Weekly <model>` per model-scoped limit; a null window is not shown.
   Known approximation: the panel filters model-scoped rows through a remote

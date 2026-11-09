@@ -60,6 +60,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -76,6 +77,11 @@ const (
 	// FetchQuotaRequest.Credential. Neither is secret.
 	sourceKey        = "source"
 	sourceClaudeCode = "claude-code"
+	// viewKey selects which windows the Claude Code source returns: every
+	// window the endpoint reports (the default), or exactly the panel's rows
+	// (viewOverlay), for the equality check against the extension.
+	viewKey     = "view"
+	viewOverlay = "overlay"
 
 	claudeCodeHost = "api.anthropic.com"
 	usagePath      = "/api/oauth/usage"
@@ -251,49 +257,227 @@ type oauthWindow struct {
 	ResetsAt    *string  `json:"resets_at"`
 }
 
+// oauthLimit is one limits[] entry. Percent and every scope field may be null.
 type oauthLimit struct {
-	Kind     string  `json:"kind"`
-	Group    string  `json:"group"`
-	Percent  float64 `json:"percent"`
-	ResetsAt *string `json:"resets_at"`
-	IsActive bool    `json:"is_active"`
-	Scope    struct {
+	Kind     string   `json:"kind"`
+	Group    string   `json:"group"`
+	Percent  *float64 `json:"percent"`
+	Severity string   `json:"severity"`
+	ResetsAt *string  `json:"resets_at"`
+	IsActive bool     `json:"is_active"`
+	Scope    *struct {
 		Model *struct {
 			DisplayName string `json:"display_name"`
 		} `json:"model"`
+		Surface json.RawMessage `json:"surface"`
 	} `json:"scope"`
 }
 
-type oauthUsage struct {
-	FiveHour       *oauthWindow
-	SevenDay       *oauthWindow
-	SevenDayOpus   *oauthWindow
-	SevenDaySonnet *oauthWindow
-	Limits         []oauthLimit
+// maxWindows bounds what one response may make of itself.
+const maxWindows = 64
+
+// usageWindow is one window the endpoint returned, whatever its name.
+type usageWindow struct {
+	// Key identifies the window across the two places the endpoint reports it
+	// (a top-level field and a limits[] entry), so the pair is drawn once. It
+	// is explicit, never derived from the label: "session" and "weekly_all"
+	// for the two standard windows, "weekly_scoped/<model>" for a model, the
+	// limit's own kind otherwise, "top/<field>" for an unknown field.
+	Key      string
+	Label    string
+	Percent  *float64 // nil: the endpoint reports no value
+	ResetsAt int64    // unix seconds, 0 unknown
+	Severity string   // limits[] only
+	Source   string   // the top-level field name, or "limits[]"
+	Model    string   // model display name of a model-scoped limit
+	FromList bool     // came from limits[]
 }
 
-// decodeUsage parses a /api/oauth/usage body. Unknown fields are ignored; a
-// malformed limits[] is dropped (the extension's schema does the same, with
-// .catch) while a malformed window is an error.
+type oauthUsage struct {
+	Windows []usageWindow
+}
+
+// The panel's labels and keys for the top-level fields it knows, in its order.
+var knownTop = []struct{ field, key, label string }{
+	{"five_hour", "session", "Session (5hr)"},
+	{"seven_day", "weekly_all", "Weekly (7 day)"},
+	{"seven_day_sonnet", "weekly_scoped/sonnet", "Weekly Sonnet"},
+	{"seven_day_opus", "weekly_scoped/opus", "Weekly Opus"},
+}
+
+// fieldLabel derives a label for a top-level field the panel has no row for:
+// seven_day_oauth_apps -> "Weekly (7 day) oauth apps".
+func fieldLabel(field string) string {
+	words := strings.Split(field, "_")
+	switch {
+	case len(words) >= 2 && words[0] == "five" && words[1] == "hour":
+		return joinLabel("Session (5hr)", words[2:])
+	case len(words) >= 2 && words[0] == "seven" && words[1] == "day":
+		return joinLabel("Weekly (7 day)", words[2:])
+	}
+	s := strings.Join(words, " ")
+	if strings.TrimSpace(s) == "" {
+		return "(unnamed window)"
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+func joinLabel(base string, rest []string) string {
+	if len(rest) == 0 {
+		return base
+	}
+	return base + " " + strings.Join(rest, " ")
+}
+
+// limitLabel and limitKey describe a limits[] entry from its kind, group and
+// scope. The key is the same as the top-level window's when it is the same
+// window, so the pair is drawn once.
+func limitKey(l oauthLimit) string {
+	if l.Scope != nil {
+		if l.Scope.Model != nil && l.Scope.Model.DisplayName != "" {
+			return l.Kind + "/" + strings.ToLower(l.Scope.Model.DisplayName)
+		}
+		if s := surfaceName(l.Scope.Surface); s != "" {
+			return l.Kind + "/surface:" + strings.ToLower(s)
+		}
+	}
+	return l.Kind
+}
+
+func surfaceName(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return strings.Trim(string(raw), `"`)
+}
+
+func limitLabel(l oauthLimit) string {
+	scope := ""
+	if l.Scope != nil {
+		if l.Scope.Model != nil && l.Scope.Model.DisplayName != "" {
+			scope = l.Scope.Model.DisplayName
+		} else if s := surfaceName(l.Scope.Surface); s != "" {
+			scope = s
+		}
+	}
+	var base string
+	switch {
+	case l.Group == "session" || l.Kind == "session":
+		base = "Session (5hr)"
+	case l.Group == "weekly" || strings.HasPrefix(l.Kind, "weekly"):
+		base = "Weekly"
+		if scope == "" {
+			base = "Weekly (7 day)"
+		}
+	default:
+		g := l.Group
+		if g == "" {
+			g = l.Kind
+		}
+		base = fieldLabel(g)
+	}
+	if scope != "" {
+		return base + " " + scope
+	}
+	return base
+}
+
+// shaped reports whether raw is an object carrying both utilization and
+// resets_at: the shape of a window.
+func shaped(raw json.RawMessage) bool {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return false
+	}
+	_, a := m["utilization"]
+	_, b := m["resets_at"]
+	return a && b
+}
+
+// decodeUsage parses a /api/oauth/usage body into every window it carries,
+// whatever their names: each top-level value shaped {utilization, resets_at},
+// then each limits[] entry the top level did not already report. Unknown
+// fields of any other shape are ignored. A known window that is malformed is
+// an error; an unknown or limits[] one that is malformed is skipped (the
+// extension's schema does the same, with .catch). At most maxWindows.
 func decodeUsage(body []byte) (oauthUsage, error) {
 	if len(body) > maxUsageBody {
 		return oauthUsage{}, errors.New("usage response too large")
 	}
-	var raw struct {
-		FiveHour       *oauthWindow    `json:"five_hour"`
-		SevenDay       *oauthWindow    `json:"seven_day"`
-		SevenDayOpus   *oauthWindow    `json:"seven_day_opus"`
-		SevenDaySonnet *oauthWindow    `json:"seven_day_sonnet"`
-		Limits         json.RawMessage `json:"limits"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil || top == nil {
 		return oauthUsage{}, errors.New("usage response is not the expected JSON object")
 	}
-	u := oauthUsage{FiveHour: raw.FiveHour, SevenDay: raw.SevenDay, SevenDayOpus: raw.SevenDayOpus, SevenDaySonnet: raw.SevenDaySonnet}
-	if len(raw.Limits) > 0 {
-		var ls []oauthLimit
-		if json.Unmarshal(raw.Limits, &ls) == nil {
-			u.Limits = ls
+	var u oauthUsage
+	at := map[string]int{} // key -> index in u.Windows
+	add := func(w usageWindow) {
+		if i, dup := at[w.Key]; dup {
+			// The same window reported twice: keep the first, unless it
+			// carries no value and this one does.
+			if u.Windows[i].Percent == nil && w.Percent != nil {
+				u.Windows[i] = w
+			}
+			return
+		}
+		if len(u.Windows) < maxWindows {
+			at[w.Key] = len(u.Windows)
+			u.Windows = append(u.Windows, w)
+		}
+	}
+	parse := func(raw json.RawMessage) (oauthWindow, bool) {
+		var w oauthWindow
+		return w, json.Unmarshal(raw, &w) == nil
+	}
+	known := map[string]bool{}
+	for _, k := range knownTop {
+		known[k.field] = true
+		raw, ok := top[k.field]
+		if !ok {
+			continue
+		}
+		if string(raw) == "null" { // a known window the endpoint reports as null: not available
+			add(usageWindow{Key: k.key, Label: k.label, Source: k.field})
+			continue
+		}
+		w, ok := parse(raw)
+		if !ok {
+			return oauthUsage{}, errors.New("usage response has a malformed " + k.field + " window")
+		}
+		add(usageWindow{Key: k.key, Label: k.label, Percent: w.Utilization, ResetsAt: unixOf(w.ResetsAt), Source: k.field})
+	}
+	fields := make([]string, 0, len(top))
+	for f := range top {
+		if f != "limits" && !known[f] {
+			fields = append(fields, f)
+		}
+	}
+	sort.Strings(fields)
+	for _, f := range fields {
+		if !shaped(top[f]) {
+			continue
+		}
+		if w, ok := parse(top[f]); ok {
+			add(usageWindow{Key: "top/" + f, Label: fieldLabel(f), Percent: w.Utilization, ResetsAt: unixOf(w.ResetsAt), Source: f})
+		}
+	}
+	if raw, ok := top["limits"]; ok {
+		var ls []json.RawMessage
+		if json.Unmarshal(raw, &ls) == nil {
+			for _, lr := range ls {
+				var l oauthLimit
+				if json.Unmarshal(lr, &l) != nil || l.Kind == "" {
+					continue
+				}
+				w := usageWindow{Key: limitKey(l), Label: limitLabel(l), Percent: l.Percent, ResetsAt: unixOf(l.ResetsAt), Severity: l.Severity, Source: "limits[]", FromList: true}
+				if l.Scope != nil && l.Scope.Model != nil {
+					w.Model = l.Scope.Model.DisplayName
+				}
+				add(w)
+			}
 		}
 	}
 	return u, nil
@@ -314,28 +498,68 @@ func unixOf(s *string) int64 {
 // the omissions of the "Account & usage" panel (webview/index.js, WDn).
 func overlayWindows(u oauthUsage, plan string) []*quotapb.QuotaWindow {
 	var out []*quotapb.QuotaWindow
-	add := func(label string, w *oauthWindow) {
-		if w == nil || w.Utilization == nil {
+	add := func(w usageWindow) {
+		if w.Percent == nil {
 			return
 		}
-		out = append(out, &quotapb.QuotaWindow{Label: label, Used: *w.Utilization, Limit: 100, Unit: "%", ResetsAtUnix: unixOf(w.ResetsAt)})
+		out = append(out, &quotapb.QuotaWindow{Label: w.Label, Used: *w.Percent, Limit: 100, Unit: "%", ResetsAtUnix: w.ResetsAt})
 	}
-	add("Session (5hr)", u.FiveHour)
-	add("Weekly (7 day)", u.SevenDay)
+	byKey := map[string]usageWindow{}
+	for _, w := range u.Windows {
+		if !w.FromList {
+			byKey[w.Key] = w
+		}
+	}
+	add(byKey["session"])
+	add(byKey["weekly_all"])
 	if plan == "max" || plan == "team" || plan == "" {
-		add("Weekly Sonnet", u.SevenDaySonnet)
+		add(byKey["weekly_scoped/sonnet"])
 	}
-	for _, l := range u.Limits {
-		if l.Scope.Model == nil || l.Scope.Model.DisplayName == "" {
+	for _, w := range u.Windows {
+		if !w.FromList || w.Model == "" {
 			continue
 		}
-		name := l.Scope.Model.DisplayName
-		if n := strings.ToLower(name); n == "sonnet" || n == "opus" {
+		if n := strings.ToLower(w.Model); n == "sonnet" || n == "opus" {
 			continue // already carried by seven_day_sonnet / seven_day_opus
 		}
-		out = append(out, &quotapb.QuotaWindow{Label: "Weekly " + name, Used: l.Percent, Limit: 100, Unit: "%", ResetsAtUnix: unixOf(l.ResetsAt)})
+		add(usageWindow{Label: "Weekly " + w.Model, Percent: w.Percent, ResetsAt: w.ResetsAt})
 	}
 	return out
+}
+
+// allWindows returns every window the endpoint reported, known labels first
+// in the panel's order, then the others; a window without a value is returned
+// as "n/a" (Unit "n/a", no limit) rather than hidden. The reason is in
+// notAvailableNote, which the snapshot's warnings carry.
+func allWindows(u oauthUsage) []*quotapb.QuotaWindow {
+	var out []*quotapb.QuotaWindow
+	for _, w := range u.Windows {
+		if w.Percent == nil {
+			out = append(out, &quotapb.QuotaWindow{Label: w.Label, Unit: unitNotAvailable, ResetsAtUnix: w.ResetsAt})
+			continue
+		}
+		out = append(out, &quotapb.QuotaWindow{Label: w.Label, Used: *w.Percent, Limit: 100, Unit: "%", ResetsAtUnix: w.ResetsAt})
+	}
+	return out
+}
+
+// unitNotAvailable marks a window the endpoint listed without a value.
+const unitNotAvailable = "n/a"
+
+// windowNotes are the snapshot warnings that explain what the windows cannot
+// say by themselves: why a window has no value, and any severity the endpoint
+// attached beyond "normal".
+func windowNotes(u oauthUsage) []string {
+	var notes []string
+	for _, w := range u.Windows {
+		if w.Percent == nil {
+			notes = append(notes, fmt.Sprintf("%s: not available (%s reports no utilization for it, null: not part of this plan or account, or not measured)", w.Label, w.Source))
+		}
+		if s := w.Severity; s != "" && s != "normal" && s != "ok" {
+			notes = append(notes, fmt.Sprintf("%s: severity %s", w.Label, s))
+		}
+	}
+	return notes
 }
 
 func checkAPIBase() (*url.URL, error) {
@@ -349,8 +573,19 @@ func checkAPIBase() (*url.URL, error) {
 	return u, nil
 }
 
-// fetchClaudeCode is FetchQuota for the Claude Code source.
-func fetchClaudeCode(ctx context.Context, accountLabel string) (*quotapb.QuotaSnapshot, error) {
+// usageFetch is what one authenticated GET of the usage endpoint yields: the
+// body (which holds no credential), the login for the plan and scopes, and
+// what the follow-up profile read needs.
+type usageFetch struct {
+	body  []byte
+	login claudeCodeLogin
+	base  *url.URL
+	red   *redact.Redactor
+}
+
+// fetchUsageBody reads the credential and GETs the usage endpoint. Every
+// error is redacted of the token.
+func fetchUsageBody(ctx context.Context) (*usageFetch, error) {
 	raw, err := readCredential(ctx)
 	if err != nil {
 		return nil, err
@@ -405,15 +640,46 @@ func fetchClaudeCode(ctx context.Context, accountLabel string) (*quotapb.QuotaSn
 	case resp.StatusCode != http.StatusOK:
 		return nil, fail(codes.Unavailable, "usage request returned %d", resp.StatusCode)
 	}
-	usage, err := decodeUsage(body)
+	return &usageFetch{body: body, login: login, base: base, red: red}, nil
+}
+
+// RawUsage is `plugin-claude --raw-usage`: the usage response as the endpoint
+// returned it, indented, for a person to see everything Claude returns. The
+// body holds no credential; the token is never part of the output.
+func RawUsage(ctx context.Context) ([]byte, error) {
+	f, err := fetchUsageBody(ctx)
 	if err != nil {
-		return nil, fail(codes.DataLoss, "%v", err)
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, f.body, "", "  "); err != nil {
+		return nil, errors.New("usage response is not JSON")
+	}
+	buf.WriteByte('\n')
+	return buf.Bytes(), nil
+}
+
+// fetchClaudeCode is FetchQuota for the Claude Code source.
+func fetchClaudeCode(ctx context.Context, accountLabel string, overlay bool) (*quotapb.QuotaSnapshot, error) {
+	f, err := fetchUsageBody(ctx)
+	if err != nil {
+		return nil, err
+	}
+	login, base, red := f.login, f.base, f.red
+	usage, err := decodeUsage(f.body)
+	if err != nil {
+		return nil, status.Error(codes.DataLoss, red.String(err.Error()))
 	}
 	snap := &quotapb.QuotaSnapshot{
 		AccountLabel:  accountLabel,
 		PlanKind:      login.plan,
 		FetchedAtUnix: time.Now().Unix(),
-		Windows:       overlayWindows(usage, login.plan),
+	}
+	if overlay {
+		snap.Windows = overlayWindows(usage, login.plan)
+	} else {
+		snap.Windows = allWindows(usage)
+		snap.Warnings = append(snap.Warnings, windowNotes(usage)...)
 	}
 	if note := planNote(ctx, login, base, red); note != "" {
 		snap.Warnings = append(snap.Warnings, note)
