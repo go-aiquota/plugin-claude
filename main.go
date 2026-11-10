@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"time"
 
 	hcplugin "github.com/hashicorp/go-plugin"
@@ -23,7 +24,30 @@ import (
 	"github.com/go-aiquota/proto/plugin"
 )
 
+// version is set at link time (-ldflags "-X main.version=v0.2.1") by a build
+// that knows the release; otherwise the module version Go recorded is used.
+var version string
+
+// versionLine is what `--version` prints: the program's name and its version,
+// never a credential and never a network call, so a smoke test can run it.
+func versionLine() string {
+	v := version
+	if v == "" {
+		v = "(devel)"
+		if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+			v = bi.Main.Version
+		}
+	}
+	return "go-aiquota-plugin-claude " + v
+}
+
 func main() {
+	// `plugin-claude --version` prints the version and exits: a client (a
+	// release smoke test) can check the program starts without a login.
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(versionLine())
+		return
+	}
 	// `plugin-claude --raw-usage` prints the usage response Claude Code's
 	// source returns (no credential in it) and exits; it is how
 	// `aiquota status -o json --raw` shows everything the endpoint says.
